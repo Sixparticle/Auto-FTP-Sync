@@ -1,12 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=collect_data_files('ttkthemes'),
+    hiddenimports=['ttkthemes'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +23,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='AutoFTPSync_v4.0.2',
+    name='AutoFTPSync',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

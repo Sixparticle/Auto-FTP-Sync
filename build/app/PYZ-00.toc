@@ -1180,6 +1180,7 @@
   ('urllib.response',
    'C:\\Users\\Hexagon\\miniconda3\\Lib\\urllib\\response.py',
    'PYMODULE'),
+  ('uuid', 'C:\\Users\\Hexagon\\miniconda3\\Lib\\uuid.py', 'PYMODULE'),
   ('watchdog',
    'C:\\Users\\Hexagon\\miniconda3\\Lib\\site-packages\\watchdog\\__init__.py',
    'PYMODULE'),

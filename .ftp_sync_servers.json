@@ -1,0 +1,14 @@
+{
+    "servers": [
+        {
+            "id": "56e3171a",
+            "host": "ep.qvps.top",
+            "port": "21",
+            "username": "ep574840",
+            "password": "92JNxvxcgdW5",
+            "remote_dir": "/",
+            "local_dir": "D:/Code/api.xunanit.cn_XXFnS/api.xunanit.cn",
+            "secure": false
+        }
+    ]
+}

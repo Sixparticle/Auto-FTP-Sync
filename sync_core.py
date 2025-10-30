@@ -14,31 +14,56 @@ import os
 import json
 import logging
 import time
-from ftplib import FTP, error_perm
+import socket
+from ftplib import FTP, FTP_TLS, error_perm
 from threading import Thread
 from queue import Queue
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 class ConfigManager:
-    """Handles loading and saving of FTP configuration from a given path."""
+    """Handles loading and saving of FTP configurations."""
+    
     @staticmethod
-    def load_config(config_path):
-        if not os.path.exists(config_path):
-            return {}
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return {}
+    def get_config_path():
+        """Returns the standard path for the config file."""
+        # Place config next to the executable or script
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base_path, '.ftp_sync_servers.json')
 
     @staticmethod
-    def save_config(config_path, config_data):
+    def load_servers():
+        """Loads the list of server configurations."""
+        config_path = ConfigManager.get_config_path()
+        if not os.path.exists(config_path):
+            return []
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # Support both the new format and migrate the old one
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict) and 'servers' in data:
+                    return data.get('servers', [])
+                elif isinstance(data, dict) and 'host' in data:
+                     # This looks like an old single-server config, wrap it
+                    return [data]
+            return []
+        except (json.JSONDecodeError, IOError):
+            logging.error(f"无法加载或解析配置文件: {config_path}")
+            return []
+
+    @staticmethod
+    def save_servers(servers_data):
+        """Saves the list of server configurations."""
+        config_path = ConfigManager.get_config_path()
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=4)
+                # Store in the new format
+                json.dump({"servers": servers_data}, f, indent=4)
             return True
         except IOError:
+            logging.error(f"无法保存配置文件到: {config_path}")
             return False
 
 class FTPUploader:
@@ -48,13 +73,37 @@ class FTPUploader:
         self.ftp = None
 
     def connect(self):
+        """Connects to the FTP server, with optional FTPS support."""
         try:
-            self.ftp = FTP()
-            self.ftp.connect(self.config['host'], int(self.config['port']))
+            host = self.config['host']
+            # Manually resolve hostname to IP address first
+            try:
+                ip_address = socket.gethostbyname(host)
+                logging.info(f"成功将主机名 '{host}' 解析为 IP 地址: {ip_address}")
+            except socket.gaierror as e:
+                logging.error(f"无法解析主机名 '{host}': {e}")
+                raise e  # Re-raise to be caught by the outer block
+
+            use_tls = self.config.get('secure', False)
+            
+            if use_tls:
+                self.ftp = FTP_TLS()
+            else:
+                self.ftp = FTP()
+
+            # Connect using the resolved IP address
+            self.ftp.connect(ip_address, int(self.config.get('port', 21)))
             self.ftp.login(self.config['username'], self.config['password'])
+            
+            if use_tls:
+                # self.ftp.prot_p()  # Temporarily disabled. Some servers reject this command.
+                pass
+
             self.ftp.set_pasv(True)
             self.ftp.encoding = 'utf-8'
             self.ftp.cwd(self.config['remote_dir'])
+            
+            logging.info(f"FTP{'S' if use_tls else ''} 连接成功到 {host} ({ip_address})")
             return True
         except Exception as e:
             logging.error(f"FTP 连接失败: {e}")
