@@ -10,6 +10,7 @@ Author: Sixparticle
 """
 
 import os
+import sys
 import json
 import logging
 import time
@@ -26,8 +27,13 @@ class ConfigManager:
     @staticmethod
     def get_config_path():
         """Returns the standard path for the config file."""
-        # Place config next to the executable or script
-        base_path = os.path.dirname(os.path.abspath(__file__))
+        # 获取 exe 文件所在目录（打包后）或脚本所在目录（开发时）
+        if getattr(sys, 'frozen', False):
+            # 打包后的 exe 文件
+            base_path = os.path.dirname(sys.executable)
+        else:
+            # 开发环境中的 .py 文件
+            base_path = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(base_path, 'data.json')
 
     @staticmethod
@@ -57,20 +63,38 @@ class ConfigManager:
         """Saves the list of server configurations."""
         config_path = ConfigManager.get_config_path()
         try:
+            # 如果文件已存在且是只读，先移除只读属性
+            if os.path.exists(config_path):
+                import stat
+                os.chmod(config_path, stat.S_IWRITE | stat.S_IREAD)
+            
             with open(config_path, 'w', encoding='utf-8') as f:
                 # Store in the new format
                 json.dump({"servers": servers_data}, f, indent=4, ensure_ascii=False)
+            
+            # 确保文件是可读可写的
+            import stat
+            os.chmod(config_path, stat.S_IWRITE | stat.S_IREAD)
             return True
-        except IOError:
-            logging.error(f"无法保存配置文件到: {config_path}")
+        except IOError as e:
+            logging.error(f"无法保存配置文件到: {config_path}, 错误: {e}")
             return False
 
     @staticmethod
     def export_to_file(servers_data, file_path):
         """Export server configurations to a specified file."""
         try:
+            # 如果文件已存在且是只读，先移除只读属性
+            if os.path.exists(file_path):
+                import stat
+                os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
+            
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump({"servers": servers_data}, f, indent=4, ensure_ascii=False)
+            
+            # 确保文件是可读可写的
+            import stat
+            os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
             return True
         except IOError as e:
             logging.error(f"无法导出配置到文件: {file_path}, 错误: {e}")
@@ -123,8 +147,9 @@ class FTPUploader:
             else:
                 self.ftp = FTP()
 
+            # 设置超时时间（30秒）防止连接长时间阻塞
             # Connect using the resolved IP address
-            self.ftp.connect(ip_address, int(self.config.get('port', 21)))
+            self.ftp.connect(ip_address, int(self.config.get('port', 21)), timeout=30)
             self.ftp.login(self.config['username'], self.config['password'])
             
             if use_tls:
@@ -243,8 +268,8 @@ class Watcher:
     def __init__(self, project_path, ftp_config):
         self.project_path = os.path.abspath(project_path)
         self.ftp_config = ftp_config
-        self.observer = Observer()
-        self.task_queue = Queue()
+        self.observer = None
+        self.task_queue = None
         self.worker_thread = None
         self.observer_thread = None
         self.is_stopping = False
@@ -277,6 +302,13 @@ class Watcher:
         logging.info("FTP 任务处理器已停止。")
 
     def start(self):
+        # Reset stopping flag
+        self.is_stopping = False
+        
+        # Create new Observer and Queue for each start (Observer cannot be restarted)
+        self.observer = Observer()
+        self.task_queue = Queue()
+        
         # Start the FTP worker thread
         self.worker_thread = Thread(target=self._ftp_task_processor, daemon=True)
         self.worker_thread.start()

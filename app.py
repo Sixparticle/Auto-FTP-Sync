@@ -101,7 +101,7 @@ class App(ThemedTk):
     def __init__(self):
         super().__init__()
         self.set_theme("arc")
-        self.title("🔄 Auto FTP Sync v5.0.0 - 多服务器版")
+        self.title("🔄 AutoFTPSync")
         self.geometry("1000x750")
         self.minsize(900, 600)
         
@@ -167,7 +167,8 @@ class App(ThemedTk):
         # Add separator
         ttk.Separator(server_ctrl_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=5)
         
-        # Import/Export buttons
+        # Save/Import/Export buttons
+        ttk.Button(server_ctrl_frame, text="💾 保存配置", command=self._save_config_manual).pack(side=tk.LEFT, padx=2)
         ttk.Button(server_ctrl_frame, text="📥 导入配置", command=self._import_config).pack(side=tk.LEFT, padx=2)
         ttk.Button(server_ctrl_frame, text="📤 导出配置", command=self._export_config).pack(side=tk.LEFT, padx=2)
 
@@ -253,6 +254,18 @@ class App(ThemedTk):
             self._save_servers()
             self._populate_server_list()
 
+    def _save_config_manual(self):
+        """手动保存配置到 data.json"""
+        if not self.servers:
+            messagebox.showwarning("警告", "当前没有任何服务器配置可以保存。")
+            return
+        
+        if ConfigManager.save_servers(self.servers):
+            messagebox.showinfo("成功", f"配置已保存到 data.json\n\n下次启动时会自动加载此配置。")
+            logging.info("配置已手动保存到 data.json", extra={'tag': 'SUCCESS'})
+        else:
+            messagebox.showerror("错误", "保存配置失败，请查看日志。")
+
     def _export_config(self):
         """Export current server configurations to data.json"""
         if not self.servers:
@@ -336,30 +349,68 @@ class App(ThemedTk):
             messagebox.showerror("错误", "没有配置任何服务器。")
             return
 
-        self._set_ui_state("watching")
+        # 清理可能存在的旧监控器（防止内存泄漏）
+        if self.watchers:
+            logging.warning("检测到旧的监控器实例，正在清理...")
+            for server_id in list(self.watchers.keys()):
+                try:
+                    old_watcher = self.watchers[server_id]
+                    if old_watcher:
+                        old_watcher.stop()
+                except Exception as e:
+                    logging.warning(f"清理旧监控器 [{server_id}] 时出错: {e}")
+            self.watchers.clear()
+
+        # 禁用启动按钮，显示启动中状态
+        self.start_button.config(state="disabled", text="▶️ 启动中...")
+        self.update_idletasks()  # 立即更新UI
         
-        for server in self.servers:
-            server_id = server['id']
-            local_dir = server.get('local_dir')
+        # 在后台线程中启动所有监控器，避免阻塞GUI
+        def start_async():
+            servers_to_start = list(self.servers)  # 复制列表避免并发问题
+            
+            for server in servers_to_start:
+                server_id = server['id']
+                local_dir = server.get('local_dir')
 
-            if not local_dir or not os.path.exists(local_dir):
-                logging.error(f"[{server_id}] 本地目录 '{local_dir}' 无效或不存在，跳过。")
-                self.server_tree.item(server_id, values=(server['id'], server['host'], local_dir, "错误"))
-                continue
+                if not local_dir or not os.path.exists(local_dir):
+                    logging.error(f"[{server_id}] 本地目录 '{local_dir}' 无效或不存在，跳过。")
+                    # 在主线程中更新UI
+                    self.after(0, lambda sid=server_id, s=server, ld=local_dir: 
+                              self.server_tree.item(sid, values=(s['id'], s['host'], ld, "错误")))
+                    continue
 
-            if server_id in self.watchers:
-                logging.warning(f"[{server_id}] 监控已在运行，跳过。")
-                continue
+                try:
+                    # 创建新的 Watcher 实例
+                    logging.info(f"[{server_id}] 正在启动监控...")
+                    watcher = Watcher(local_dir, server)
+                    watcher.start()
+                    self.watchers[server_id] = watcher
+                    
+                    # 在主线程中更新UI（避免TreeView并发问题）
+                    self.after(0, lambda sid=server_id, s=server, ld=local_dir: 
+                              self.server_tree.item(sid, values=(s['id'], s['host'], ld, "监控中")))
+                    logging.info(f"[{server_id}] 监控已启动 -> {local_dir}", extra={'tag': 'SUCCESS'})
+                    
+                except Exception as e:
+                    logging.error(f"[{server_id}] 启动监控失败: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    # 在主线程中更新UI
+                    self.after(0, lambda sid=server_id, s=server, ld=local_dir: 
+                              self.server_tree.item(sid, values=(s['id'], s['host'], ld, "启动失败")))
+            
+            # 所有启动完成后，在主线程中更新UI状态
+            self.after(0, self._finalize_start)
+        
+        # 在后台线程中启动
+        Thread(target=start_async, daemon=True).start()
 
-            try:
-                watcher = Watcher(local_dir, server)
-                watcher.start()
-                self.watchers[server_id] = watcher
-                self.server_tree.item(server_id, values=(server['id'], server['host'], local_dir, "监控中"))
-                logging.info(f"[{server_id}] 监控已启动 -> {local_dir}", extra={'tag': 'SUCCESS'})
-            except Exception as e:
-                logging.error(f"[{server_id}] 启动监控失败: {e}")
-                self.server_tree.item(server_id, values=(server['id'], server['host'], local_dir, "启动失败"))
+    def _finalize_start(self):
+        """启动完成后的UI更新"""
+        self._set_ui_state("watching")
+        self.start_button.config(text="▶️ 开始全部")
+        logging.info("所有监控器启动完成。", extra={'tag': 'SUCCESS'})
 
     def _stop_all_watchers(self):
         self.stop_button.config(state="disabled", text="⏸️ 停止中...")
