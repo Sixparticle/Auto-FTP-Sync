@@ -6,9 +6,7 @@ Auto FTP Sync Tool (Watcher Edition)
 A Python script that monitors a project directory for file changes in real-time
 and automatically uploads them to an FTP server.
 
-Author: Cline (AI Software Engineer)
-Version: 2.0.0
-Dependencies: watchdog
+Author: Sixparticle
 """
 
 import os

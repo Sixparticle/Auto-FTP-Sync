@@ -6,8 +6,7 @@ Auto FTP Sync Tool (GUI Application)
 A graphical user interface for the Auto FTP Sync tool, allowing users to
 manage multiple FTP server sync configurations and monitor them simultaneously.
 
-Author: Cline (AI Software Engineer)
-Version: 5.0.0 - Multi-Server Support
+Author: Sixparticle
 """
 
 import tkinter as tk
@@ -164,6 +163,13 @@ class App(ThemedTk):
         ttk.Button(server_ctrl_frame, text="➕ 添加", command=self._add_server).pack(side=tk.LEFT, padx=2)
         ttk.Button(server_ctrl_frame, text="✏️ 编辑", command=self._edit_server).pack(side=tk.LEFT, padx=2)
         ttk.Button(server_ctrl_frame, text="➖ 删除", command=self._delete_server).pack(side=tk.LEFT, padx=2)
+        
+        # Add separator
+        ttk.Separator(server_ctrl_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        
+        # Import/Export buttons
+        ttk.Button(server_ctrl_frame, text="📥 导入配置", command=self._import_config).pack(side=tk.LEFT, padx=2)
+        ttk.Button(server_ctrl_frame, text="📤 导出配置", command=self._export_config).pack(side=tk.LEFT, padx=2)
 
         # --- Main Controls ---
         control_frame = ttk.LabelFrame(left_panel, text="🎮 监控控制", padding="10")
@@ -246,6 +252,84 @@ class App(ThemedTk):
             self.servers = [s for s in self.servers if s['id'] != selected_item]
             self._save_servers()
             self._populate_server_list()
+
+    def _export_config(self):
+        """Export current server configurations to data.json"""
+        if not self.servers:
+            messagebox.showwarning("警告", "当前没有任何服务器配置可以导出。")
+            return
+        
+        file_path = filedialog.asksaveasfilename(
+            title="导出配置到文件",
+            defaultextension=".json",
+            initialfile="data.json",
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
+        )
+        
+        if file_path:
+            if ConfigManager.export_to_file(self.servers, file_path):
+                messagebox.showinfo("成功", f"配置已成功导出到:\n{file_path}")
+                logging.info(f"配置已导出到: {file_path}", extra={'tag': 'SUCCESS'})
+            else:
+                messagebox.showerror("错误", "导出配置失败，请查看日志。")
+
+    def _import_config(self):
+        """Import server configurations from a file"""
+        file_path = filedialog.askopenfilename(
+            title="选择要导入的配置文件",
+            defaultextension=".json",
+            initialfile="data.json",
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
+        )
+        
+        if not file_path:
+            return
+        
+        imported_servers = ConfigManager.import_from_file(file_path)
+        
+        if imported_servers is None:
+            messagebox.showerror("错误", "无法读取配置文件，请检查文件格式。")
+            return
+        
+        if not imported_servers:
+            messagebox.showwarning("警告", "配置文件中没有找到有效的服务器配置。")
+            return
+        
+        # Ask user whether to replace or merge
+        if self.servers:
+            response = messagebox.askyesnocancel(
+                "导入选项",
+                f"找到 {len(imported_servers)} 个服务器配置。\n\n"
+                "是 - 合并到现有配置（添加新服务器）\n"
+                "否 - 替换现有配置（清空后导入）\n"
+                "取消 - 取消导入"
+            )
+            
+            if response is None:  # Cancel
+                return
+            elif response:  # Yes - Merge
+                # Check for duplicate IDs and regenerate if needed
+                existing_ids = {s['id'] for s in self.servers}
+                for server in imported_servers:
+                    if server['id'] in existing_ids:
+                        # Regenerate ID for duplicates
+                        old_id = server['id']
+                        server['id'] = str(uuid.uuid4())[:8]
+                        logging.info(f"重复ID已重新生成: {old_id} -> {server['id']}")
+                
+                self.servers.extend(imported_servers)
+                messagebox.showinfo("成功", f"已合并 {len(imported_servers)} 个服务器配置。")
+            else:  # No - Replace
+                self.servers = imported_servers
+                messagebox.showinfo("成功", f"已导入 {len(imported_servers)} 个服务器配置（替换模式）。")
+        else:
+            # No existing servers, just import
+            self.servers = imported_servers
+            messagebox.showinfo("成功", f"已导入 {len(imported_servers)} 个服务器配置。")
+        
+        self._save_servers()
+        self._populate_server_list()
+        logging.info(f"从 {file_path} 导入配置成功", extra={'tag': 'SUCCESS'})
 
     def _start_all_watchers(self):
         if not self.servers:

@@ -6,8 +6,7 @@ Auto FTP Sync Tool (Core Logic Module)
 This module contains the backend logic for file detection, FTP operations,
 and state management. It is designed to be used by a GUI or other frontends.
 
-Author: Cline (AI Software Engineer)
-Version: 4.0.2 - Bug Fix: Complete non-blocking stop
+Author: Sixparticle
 """
 
 import os
@@ -29,7 +28,7 @@ class ConfigManager:
         """Returns the standard path for the config file."""
         # Place config next to the executable or script
         base_path = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(base_path, '.ftp_sync_servers.json')
+        return os.path.join(base_path, 'data.json')
 
     @staticmethod
     def load_servers():
@@ -60,11 +59,44 @@ class ConfigManager:
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
                 # Store in the new format
-                json.dump({"servers": servers_data}, f, indent=4)
+                json.dump({"servers": servers_data}, f, indent=4, ensure_ascii=False)
             return True
         except IOError:
             logging.error(f"无法保存配置文件到: {config_path}")
             return False
+
+    @staticmethod
+    def export_to_file(servers_data, file_path):
+        """Export server configurations to a specified file."""
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump({"servers": servers_data}, f, indent=4, ensure_ascii=False)
+            return True
+        except IOError as e:
+            logging.error(f"无法导出配置到文件: {file_path}, 错误: {e}")
+            return False
+
+    @staticmethod
+    def import_from_file(file_path):
+        """Import server configurations from a specified file."""
+        if not os.path.exists(file_path):
+            logging.error(f"配置文件不存在: {file_path}")
+            return None
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # Support both the new format and simple list format
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict) and 'servers' in data:
+                    return data.get('servers', [])
+                elif isinstance(data, dict) and 'host' in data:
+                    # Single server config, wrap it
+                    return [data]
+            return []
+        except (json.JSONDecodeError, IOError) as e:
+            logging.error(f"无法加载或解析配置文件: {file_path}, 错误: {e}")
+            return None
 
 class FTPUploader:
     """Handles all FTP operations."""
