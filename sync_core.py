@@ -221,6 +221,80 @@ class FTPUploader:
             logging.error(f"  [删除失败] {remote_path}: {e}")
             return False
 
+    def delete_directory(self, remote_path):
+        """递归删除远程目录及其所有内容"""
+        try:
+            # 切换到目标目录的父目录
+            parent_dir = os.path.dirname(remote_path).replace('\\', '/')
+            if parent_dir:
+                self.ftp.cwd(self.config['remote_dir'])
+                if parent_dir:
+                    self.ftp.cwd(parent_dir)
+            else:
+                self.ftp.cwd(self.config['remote_dir'])
+            
+            # 获取目录名
+            dir_name = os.path.basename(remote_path)
+            
+            try:
+                # 尝试列出目录内容
+                self.ftp.cwd(dir_name)
+                items = []
+                self.ftp.retrlines('LIST', items.append)
+                
+                # 递归删除目录中的所有内容
+                for item in items:
+                    # 解析 LIST 输出（简化版，可能需要根据服务器调整）
+                    parts = item.split()
+                    if len(parts) < 9:
+                        continue
+                    
+                    permissions = parts[0]
+                    name = ' '.join(parts[8:])
+                    
+                    # 跳过 . 和 ..
+                    if name in ['.', '..']:
+                        continue
+                    
+                    # 判断是文件还是目录
+                    if permissions.startswith('d'):
+                        # 递归删除子目录
+                        sub_path = f"{remote_path}/{name}".replace('//', '/')
+                        self.delete_directory(sub_path)
+                    else:
+                        # 删除文件
+                        self.ftp.delete(name)
+                        logging.info(f"  [删除文件] {remote_path}/{name}")
+                
+                # 返回父目录并删除空目录
+                self.ftp.cwd('..')
+                self.ftp.rmd(dir_name)
+                logging.info(f"  [删除目录成功] {remote_path}")
+                
+            except error_perm:
+                # 目录可能已经不存在或为空，尝试直接删除
+                self.ftp.cwd(self.config['remote_dir'])
+                if parent_dir:
+                    self.ftp.cwd(parent_dir)
+                self.ftp.rmd(dir_name)
+                logging.info(f"  [删除空目录成功] {remote_path}")
+            
+            # 返回根目录
+            self.ftp.cwd(self.config['remote_dir'])
+            return True
+            
+        except error_perm as e:
+            logging.warning(f"  [删除目录失败] {remote_path}: {e}. 可能目录已不存在。")
+            return False
+        except Exception as e:
+            logging.error(f"  [删除目录失败] {remote_path}: {e}")
+            # 确保返回根目录
+            try:
+                self.ftp.cwd(self.config['remote_dir'])
+            except:
+                pass
+            return False
+
     def close(self):
         if self.ftp:
             try:
@@ -255,11 +329,18 @@ class SyncHandler(FileSystemEventHandler):
             self._queue_task('upload', event.src_path)
 
     def on_deleted(self, event):
-        if not event.is_directory:
+        if event.is_directory:
+            self._queue_task('delete_dir', event.src_path)
+        else:
             self._queue_task('delete', event.src_path)
 
     def on_moved(self, event):
-        if not event.is_directory:
+        if event.is_directory:
+            # 目录移动：删除旧目录，然后需要重新上传整个目录（这里简化处理）
+            self._queue_task('delete_dir', event.src_path)
+            # 注意：完整实现需要递归上传新目录的所有内容
+            logging.warning(f"检测到目录移动: {event.src_path} -> {event.dest_path}. 已删除旧目录，请手动上传新目录内容。")
+        else:
             self._queue_task('delete', event.src_path)
             self._queue_task('upload', event.dest_path)
 
@@ -295,6 +376,8 @@ class Watcher:
                 uploader.upload_file(local_path, rel_path)
             elif action == 'delete':
                 uploader.delete_file(rel_path)
+            elif action == 'delete_dir':
+                uploader.delete_directory(rel_path)
 
             self.task_queue.task_done()
 

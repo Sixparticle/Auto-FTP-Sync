@@ -67,7 +67,7 @@ class ServerConfigDialog(tk.Toplevel):
 
         # Buttons
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=len(fields), column=0, columnspan=3, pady=(10, 0))
+        btn_frame.grid(row=len(fields)+1, column=0, columnspan=3, pady=(10, 0))
         
         ttk.Button(btn_frame, text="保存", command=self._on_ok, style='Accent.TButton').pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_frame, text="取消", command=self._on_cancel).pack(side=tk.RIGHT)
