@@ -224,67 +224,80 @@ class FTPUploader:
     def delete_directory(self, remote_path):
         """递归删除远程目录及其所有内容"""
         try:
-            # 切换到目标目录的父目录
-            parent_dir = os.path.dirname(remote_path).replace('\\', '/')
-            if parent_dir:
-                self.ftp.cwd(self.config['remote_dir'])
-                if parent_dir:
-                    self.ftp.cwd(parent_dir)
-            else:
-                self.ftp.cwd(self.config['remote_dir'])
+            logging.info(f"  [开始删除目录] {remote_path}")
             
-            # 获取目录名
-            dir_name = os.path.basename(remote_path)
-            
+            # 先尝试用 nlst 获取目录内容（更简单可靠）
             try:
-                # 尝试列出目录内容
-                self.ftp.cwd(dir_name)
-                items = []
-                self.ftp.retrlines('LIST', items.append)
-                
-                # 递归删除目录中的所有内容
-                for item in items:
-                    # 解析 LIST 输出（简化版，可能需要根据服务器调整）
-                    parts = item.split()
-                    if len(parts) < 9:
-                        continue
-                    
-                    permissions = parts[0]
-                    name = ' '.join(parts[8:])
-                    
-                    # 跳过 . 和 ..
-                    if name in ['.', '..']:
-                        continue
-                    
-                    # 判断是文件还是目录
-                    if permissions.startswith('d'):
-                        # 递归删除子目录
-                        sub_path = f"{remote_path}/{name}".replace('//', '/')
-                        self.delete_directory(sub_path)
-                    else:
-                        # 删除文件
-                        self.ftp.delete(name)
-                        logging.info(f"  [删除文件] {remote_path}/{name}")
-                
-                # 返回父目录并删除空目录
-                self.ftp.cwd('..')
-                self.ftp.rmd(dir_name)
-                logging.info(f"  [删除目录成功] {remote_path}")
-                
-            except error_perm:
-                # 目录可能已经不存在或为空，尝试直接删除
+                # 切换到远程根目录
                 self.ftp.cwd(self.config['remote_dir'])
-                if parent_dir:
-                    self.ftp.cwd(parent_dir)
-                self.ftp.rmd(dir_name)
+                
+                # 切换到目标目录
+                self.ftp.cwd(remote_path)
+                current_path = self.ftp.pwd()
+                logging.info(f"  [当前目录] {current_path}")
+                
+                # 获取目录内容列表
+                items = []
+                try:
+                    items = self.ftp.nlst()
+                except error_perm:
+                    # nlst 可能失败，使用 LIST
+                    items = []
+                    lines = []
+                    self.ftp.retrlines('LIST', lines.append)
+                    for line in lines:
+                        parts = line.split()
+                        if len(parts) >= 9:
+                            name = ' '.join(parts[8:])
+                            if name not in ['.', '..']:
+                                items.append(name)
+                
+                # 删除目录中的所有内容
+                for item in items:
+                    if item in ['.', '..']:
+                        continue
+                    
+                    item_path = f"{current_path}/{item}".lstrip('/')
+                    
+                    # 尝试判断是文件还是目录
+                    try:
+                        # 尝试切换到该路径，如果成功则是目录
+                        self.ftp.cwd(item)
+                        self.ftp.cwd('..')  # 返回
+                        # 是目录，递归删除
+                        logging.info(f"  [发现子目录] {item}")
+                        self.delete_directory(item_path)
+                    except error_perm:
+                        # 不是目录，是文件，直接删除
+                        try:
+                            self.ftp.delete(item)
+                            logging.info(f"  [删除文件] {item}")
+                        except error_perm as e:
+                            logging.warning(f"  [删除文件失败] {item}: {e}")
+                
+                # 返回父目录
+                self.ftp.cwd(self.config['remote_dir'])
+                
+                # 删除空目录
+                self.ftp.rmd(remote_path)
+                logging.info(f"  [删除目录成功] {remote_path}")
+                return True
+                
+            except error_perm as e:
+                # 可能目录已经不存在或为空，尝试直接删除
+                logging.info(f"  [尝试直接删除目录] {remote_path}")
+                self.ftp.cwd(self.config['remote_dir'])
+                self.ftp.rmd(remote_path)
                 logging.info(f"  [删除空目录成功] {remote_path}")
-            
-            # 返回根目录
-            self.ftp.cwd(self.config['remote_dir'])
-            return True
+                return True
             
         except error_perm as e:
             logging.warning(f"  [删除目录失败] {remote_path}: {e}. 可能目录已不存在。")
+            # 确保返回根目录
+            try:
+                self.ftp.cwd(self.config['remote_dir'])
+            except:
+                pass
             return False
         except Exception as e:
             logging.error(f"  [删除目录失败] {remote_path}: {e}")
@@ -309,6 +322,8 @@ class SyncHandler(FileSystemEventHandler):
         self.task_queue = task_queue
         # Added .vscode as per user request
         self.ignored_items = {'.ftp_config.json', '.sync_state.json', 'sync.log', '.vscode', '.git'}
+        # Track known directories to handle delete events correctly
+        self.known_directories = set()
 
     def _is_ignored(self, path):
         # Check if the path contains any of the ignored directory/file names.
@@ -321,7 +336,11 @@ class SyncHandler(FileSystemEventHandler):
         self.task_queue.put((action, path))
 
     def on_created(self, event):
-        if not event.is_directory:
+        if event.is_directory:
+            # Track created directories
+            self.known_directories.add(event.src_path)
+            logging.info(f"检测到目录创建: {event.src_path}")
+        else:
             self._queue_task('upload', event.src_path)
 
     def on_modified(self, event):
@@ -329,13 +348,24 @@ class SyncHandler(FileSystemEventHandler):
             self._queue_task('upload', event.src_path)
 
     def on_deleted(self, event):
-        if event.is_directory:
+        # 当路径被删除后，event.is_directory 可能不准确
+        # 检查我们是否追踪了这个路径为目录
+        is_dir = event.is_directory or event.src_path in self.known_directories
+        
+        if is_dir:
+            logging.info(f"检测到目录删除: {event.src_path}")
             self._queue_task('delete_dir', event.src_path)
+            # 从追踪集合中移除
+            self.known_directories.discard(event.src_path)
         else:
+            logging.info(f"检测到文件删除: {event.src_path}")
             self._queue_task('delete', event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
+            # 更新目录追踪
+            self.known_directories.discard(event.src_path)
+            self.known_directories.add(event.dest_path)
             # 目录移动：删除旧目录，然后需要重新上传整个目录（这里简化处理）
             self._queue_task('delete_dir', event.src_path)
             # 注意：完整实现需要递归上传新目录的所有内容
@@ -375,8 +405,10 @@ class Watcher:
             if action == 'upload':
                 uploader.upload_file(local_path, rel_path)
             elif action == 'delete':
+                logging.info(f"执行文件删除: {rel_path}")
                 uploader.delete_file(rel_path)
             elif action == 'delete_dir':
+                logging.info(f"执行目录删除: {rel_path}")
                 uploader.delete_directory(rel_path)
 
             self.task_queue.task_done()
@@ -398,9 +430,27 @@ class Watcher:
 
         # Start the file system observer
         event_handler = SyncHandler(self.project_path, self.task_queue)
+        
+        # 初始化时扫描现有目录结构
+        logging.info(f"正在扫描现有目录结构...")
+        self._scan_existing_directories(event_handler)
+        
         self.observer.schedule(event_handler, self.project_path, recursive=True)
         self.observer.start()  # This starts observer in its own thread automatically
         logging.info(f"开始监控目录: {self.project_path}")
+
+    def _scan_existing_directories(self, handler):
+        """扫描并记录所有现有的目录"""
+        try:
+            for root, dirs, files in os.walk(self.project_path):
+                for dir_name in dirs:
+                    dir_path = os.path.join(root, dir_name)
+                    # 检查是否应该忽略
+                    if not handler._is_ignored(dir_path):
+                        handler.known_directories.add(dir_path)
+            logging.info(f"已扫描 {len(handler.known_directories)} 个目录")
+        except Exception as e:
+            logging.warning(f"扫描目录结构时出错: {e}")
 
     def stop(self):
         """停止监控，使用非阻塞方式避免 GUI 冻结"""
