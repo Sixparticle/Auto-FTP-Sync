@@ -127,6 +127,7 @@ class FTPUploader:
     def __init__(self, config):
         self.config = config
         self.ftp = None
+        self.last_activity_time = 0  # 记录最后活动时间
 
     def connect(self):
         """Connects to the FTP server, with optional FTPS support."""
@@ -160,11 +161,39 @@ class FTPUploader:
             self.ftp.encoding = 'utf-8'
             self.ftp.cwd(self.config['remote_dir'])
             
+            self.last_activity_time = time.time()  # 更新活动时间
             logging.info(f"FTP{'S' if use_tls else ''} 连接成功到 {host} ({ip_address})")
             return True
         except Exception as e:
             logging.error(f"FTP 连接失败: {e}")
             return False
+
+    def is_connected(self):
+        """检查FTP连接是否仍然有效"""
+        if not self.ftp:
+            return False
+        try:
+            # 发送 NOOP 命令检查连接
+            self.ftp.voidcmd("NOOP")
+            self.last_activity_time = time.time()
+            return True
+        except Exception:
+            return False
+
+    def reconnect_if_needed(self):
+        """如果连接超时或断开，尝试重新连接"""
+        # 如果距离上次活动超过20秒，先检查连接
+        if time.time() - self.last_activity_time > 20:
+            if not self.is_connected():
+                logging.warning("FTP 连接已断开，尝试重新连接...")
+                self.close()
+                if self.connect():
+                    logging.info("FTP 重新连接成功")
+                    return True
+                else:
+                    logging.error("FTP 重新连接失败")
+                    return False
+        return True
 
     def _ensure_remote_dir(self, remote_path):
         # Ensure remote directory exists, creating it if necessary.
@@ -196,9 +225,15 @@ class FTPUploader:
 
     def upload_file(self, local_path, remote_path):
         try:
+            # 在执行操作前检查并重连
+            if not self.reconnect_if_needed():
+                logging.error(f"  [上传失败] {remote_path}: 无法建立FTP连接")
+                return False
+            
             self._ensure_remote_dir(remote_path)
             with open(local_path, 'rb') as f:
                 self.ftp.storbinary(f'STOR {remote_path}', f)
+            self.last_activity_time = time.time()  # 更新活动时间
             logging.info(f"  [上传成功] {remote_path}")
             return True
         except FileNotFoundError:
@@ -206,11 +241,21 @@ class FTPUploader:
             return False
         except Exception as e:
             logging.error(f"  [上传失败] {remote_path}: {e}")
+            # 如果出现超时等错误，尝试重新连接
+            if "timed out" in str(e).lower() or "connection" in str(e).lower():
+                logging.warning("检测到连接问题，下次操作时将自动重连")
+                self.last_activity_time = 0  # 强制下次重连
             return False
 
     def delete_file(self, remote_path):
         try:
+            # 在执行操作前检查并重连
+            if not self.reconnect_if_needed():
+                logging.error(f"  [删除失败] {remote_path}: 无法建立FTP连接")
+                return False
+            
             self.ftp.delete(remote_path)
+            self.last_activity_time = time.time()  # 更新活动时间
             logging.info(f"  [删除成功] {remote_path}")
             return True
         except error_perm as e:
@@ -219,11 +264,20 @@ class FTPUploader:
             return False
         except Exception as e:
             logging.error(f"  [删除失败] {remote_path}: {e}")
+            # 如果出现超时等错误，尝试重新连接
+            if "timed out" in str(e).lower() or "connection" in str(e).lower():
+                logging.warning("检测到连接问题，下次操作时将自动重连")
+                self.last_activity_time = 0  # 强制下次重连
             return False
 
     def delete_directory(self, remote_path):
         """递归删除远程目录及其所有内容"""
         try:
+            # 在执行操作前检查并重连
+            if not self.reconnect_if_needed():
+                logging.error(f"  [删除目录失败] {remote_path}: 无法建立FTP连接")
+                return False
+            
             logging.info(f"  [开始删除目录] {remote_path}")
             
             # 先尝试用 nlst 获取目录内容（更简单可靠）
@@ -324,6 +378,9 @@ class SyncHandler(FileSystemEventHandler):
         self.ignored_items = {'.ftp_config.json', '.sync_state.json', 'sync.log', '.vscode', '.git'}
         # Track known directories to handle delete events correctly
         self.known_directories = set()
+        # 去重：记录最近的操作，防止短时间内重复
+        self.recent_tasks = {}  # {(action, path): timestamp}
+        self.debounce_seconds = 2  # 2秒内的相同操作会被忽略
 
     def _is_ignored(self, path):
         # Check if the path contains any of the ignored directory/file names.
@@ -332,6 +389,26 @@ class SyncHandler(FileSystemEventHandler):
     def _queue_task(self, action, path):
         if self._is_ignored(path):
             return
+        
+        # 去重：检查是否在短时间内有相同的任务
+        task_key = (action, path)
+        current_time = time.time()
+        
+        if task_key in self.recent_tasks:
+            last_time = self.recent_tasks[task_key]
+            if current_time - last_time < self.debounce_seconds:
+                # 忽略重复的任务
+                return
+        
+        # 记录这次任务
+        self.recent_tasks[task_key] = current_time
+        
+        # 清理过期的记录（保持字典大小合理）
+        if len(self.recent_tasks) > 1000:
+            expired_keys = [k for k, v in self.recent_tasks.items() if current_time - v > self.debounce_seconds * 2]
+            for k in expired_keys:
+                del self.recent_tasks[k]
+        
         logging.info(f"检测到变更，加入队列: {action.upper()} -> {path}")
         self.task_queue.put((action, path))
 
@@ -388,28 +465,60 @@ class Watcher:
     def _ftp_task_processor(self):
         """Worker that processes tasks from the queue."""
         uploader = FTPUploader(self.ftp_config)
-        if not uploader.connect():
-            logging.error("FTP 任务处理器无法连接，线程终止。")
+        
+        # 首次连接，最多重试3次
+        max_retries = 3
+        for attempt in range(max_retries):
+            if uploader.connect():
+                break
+            if attempt < max_retries - 1:
+                logging.warning(f"FTP 连接失败，{2}秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                time.sleep(2)
+        else:
+            logging.error("FTP 任务处理器无法连接，已达到最大重试次数，线程终止。")
             return
 
         logging.info("FTP 任务处理器已启动并连接成功。")
 
         while True:
-            task = self.task_queue.get()
+            try:
+                # 使用超时获取任务，这样可以定期检查连接状态
+                task = self.task_queue.get(timeout=10)
+            except:
+                # 队列超时，发送保活命令
+                if uploader.is_connected():
+                    continue
+                else:
+                    # 连接断开，尝试重连
+                    logging.warning("检测到连接断开，尝试重新连接...")
+                    if not uploader.connect():
+                        logging.error("重新连接失败，任务处理器继续等待...")
+                    continue
+            
             if task is None:  # Sentinel to stop the thread
                 break
 
             action, local_path = task
             rel_path = os.path.relpath(local_path, self.project_path).replace('\\', '/')
 
-            if action == 'upload':
-                uploader.upload_file(local_path, rel_path)
-            elif action == 'delete':
-                logging.info(f"执行文件删除: {rel_path}")
-                uploader.delete_file(rel_path)
-            elif action == 'delete_dir':
-                logging.info(f"执行目录删除: {rel_path}")
-                uploader.delete_directory(rel_path)
+            # 执行任务，如果失败则重试一次
+            success = False
+            for retry in range(2):  # 最多尝试2次
+                if action == 'upload':
+                    success = uploader.upload_file(local_path, rel_path)
+                elif action == 'delete':
+                    logging.info(f"执行文件删除: {rel_path}")
+                    success = uploader.delete_file(rel_path)
+                elif action == 'delete_dir':
+                    logging.info(f"执行目录删除: {rel_path}")
+                    success = uploader.delete_directory(rel_path)
+                
+                if success:
+                    break
+                elif retry == 0:
+                    # 第一次失败，等待1秒后重试
+                    logging.warning(f"操作失败，1秒后重试...")
+                    time.sleep(1)
 
             self.task_queue.task_done()
 
