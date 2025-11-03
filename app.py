@@ -109,9 +109,11 @@ class App(ThemedTk):
 
         self.watchers = {}
         self.servers = []
+        self.selected_ids = set()
         
         self.stats = {'synced_files': 0, 'errors': 0, 'start_time': None}
 
+        self._setup_styles()
         self._create_widgets()
         self._setup_logging()
         self._load_servers()
@@ -141,20 +143,24 @@ class App(ThemedTk):
         server_frame = ttk.LabelFrame(left_panel, text="📁 服务器列表", padding="10")
         server_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("id", "host", "local_dir", "status")
-        self.server_tree = ttk.Treeview(server_frame, columns=columns, show="headings")
+        columns = ("selected", "id", "host", "local_dir", "status")
+        self.server_tree = ttk.Treeview(server_frame, columns=columns, show="headings", selectmode='none')
         
+        self.server_tree.heading("selected", text="选择")
         self.server_tree.heading("id", text="ID")
         self.server_tree.heading("host", text="服务器地址")
         self.server_tree.heading("local_dir", text="本地目录")
         self.server_tree.heading("status", text="状态")
 
+        self.server_tree.column("selected", width=60, anchor=tk.CENTER)
         self.server_tree.column("id", width=80, anchor=tk.W)
         self.server_tree.column("host", width=150, anchor=tk.W)
         self.server_tree.column("local_dir", width=250, anchor=tk.W)
         self.server_tree.column("status", width=100, anchor=tk.CENTER)
 
         self.server_tree.pack(fill=tk.BOTH, expand=True)
+        # 单击复选框列切换勾选
+        self.server_tree.bind('<Button-1>', self._on_tree_click)
         
         # --- Server Controls ---
         server_ctrl_frame = ttk.Frame(left_panel)
@@ -172,14 +178,24 @@ class App(ThemedTk):
         ttk.Button(server_ctrl_frame, text="📥 导入配置", command=self._import_config).pack(side=tk.LEFT, padx=2)
         ttk.Button(server_ctrl_frame, text="📤 导出配置", command=self._export_config).pack(side=tk.LEFT, padx=2)
 
+        # Selection controls on their own row (labeled frame with grid layout)
+        selection_ctrl_frame = ttk.LabelFrame(left_panel, text="🗂 批量选择", padding="8")
+        selection_ctrl_frame.pack(fill=tk.X, pady=(8, 0))
+        selection_ctrl_frame.columnconfigure(0, weight=1)
+        selection_ctrl_frame.columnconfigure(1, weight=1)
+        btn_select_all = ttk.Button(selection_ctrl_frame, text="✅ 全选", command=self._select_all, style='Tool.TButton', width=14)
+        btn_select_all.grid(row=0, column=0, sticky=tk.EW, padx=4, pady=2)
+        btn_unselect_all = ttk.Button(selection_ctrl_frame, text="🧹 取消全选", command=self._unselect_all, style='Tool.TButton', width=14)
+        btn_unselect_all.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
+
         # --- Main Controls ---
         control_frame = ttk.LabelFrame(left_panel, text="🎮 监控控制", padding="10")
         control_frame.pack(fill=tk.X, pady=(20, 0))
         
-        self.start_button = ttk.Button(control_frame, text="▶️ 开始全部", command=self._start_all_watchers, style='Accent.TButton')
+        self.start_button = ttk.Button(control_frame, text="▶️ 开始监控", command=self._start_monitoring, style='Accent.TButton')
         self.start_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
-        self.stop_button = ttk.Button(control_frame, text="⏸️ 停止全部", state="disabled", command=self._stop_all_watchers)
+        self.stop_button = ttk.Button(control_frame, text="⏸️ 停止监控", state="disabled", command=self._stop_monitoring)
         self.stop_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
 
         # --- Log Area ---
@@ -209,7 +225,9 @@ class App(ThemedTk):
             self.server_tree.delete(item)
         
         for server in self.servers:
+            sel_mark = '☑' if server.get('id') in self.selected_ids else '☐'
             self.server_tree.insert("", tk.END, iid=server['id'], values=(
+                sel_mark,
                 server.get('id', ''),
                 server.get('host', ''),
                 server.get('local_dir', ''),
@@ -251,6 +269,8 @@ class App(ThemedTk):
 
         if messagebox.askyesno("确认删除", f"确定要删除服务器配置 '{selected_item}' 吗？"):
             self.servers = [s for s in self.servers if s['id'] != selected_item]
+            # 移除选择状态
+            self.selected_ids.discard(selected_item)
             self._save_servers()
             self._populate_server_list()
 
@@ -409,8 +429,75 @@ class App(ThemedTk):
     def _finalize_start(self):
         """启动完成后的UI更新"""
         self._set_ui_state("watching")
-        self.start_button.config(text="▶️ 开始全部")
+        self.start_button.config(text="▶️ 开始监控")
         logging.info("所有监控器启动完成。", extra={'tag': 'SUCCESS'})
+
+    def _start_monitoring(self):
+        # 基于复选框选择状态
+        targets = [s for s in self.servers if s.get('id') in self.selected_ids]
+        if not targets:
+            messagebox.showwarning("提示", "请选择至少一个服务器进行监控。")
+            return
+
+        # 禁用按钮，避免重复点击
+        self.start_button.config(state="disabled", text="▶️ 启动中...")
+        self.update_idletasks()
+
+        def start_async():
+            for server in targets:
+                server_id = server['id']
+                local_dir = server.get('local_dir')
+
+                if server_id in self.watchers and self.watchers[server_id]:
+                    logging.info(f"[{server_id}] 已在运行，跳过重复启动。")
+                    self.after(0, lambda sid=server_id, s=server, ld=local_dir:
+                              self.server_tree.item(sid, values=(
+                                  '☑', s['id'], s['host'], ld, "监控中")))
+                    continue
+
+                if not local_dir or not os.path.exists(local_dir):
+                    logging.error(f"[{server_id}] 本地目录 '{local_dir}' 无效或不存在，跳过。")
+                    self.after(0, lambda sid=server_id, s=server, ld=local_dir:
+                              self.server_tree.item(sid, values=(
+                                  '☑', s['id'], s['host'], ld, "错误")))
+                    continue
+
+                try:
+                    logging.info(f"[{server_id}] 正在启动监控...")
+                    watcher = Watcher(local_dir, server)
+                    watcher.start()
+                    self.watchers[server_id] = watcher
+                    self.after(0, lambda sid=server_id, s=server, ld=local_dir:
+                              self.server_tree.item(sid, values=(
+                                  '☑', s['id'], s['host'], ld, "监控中")))
+                    logging.info(f"[{server_id}] 监控已启动 -> {local_dir}", extra={'tag': 'SUCCESS'})
+                except Exception as e:
+                    logging.error(f"[{server_id}] 启动监控失败: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    self.after(0, lambda sid=server_id, s=server, ld=local_dir:
+                              self.server_tree.item(sid, values=(
+                                  '☑', s['id'], s['host'], ld, "启动失败")))
+
+            self.after(0, self._finalize_start)
+
+        Thread(target=start_async, daemon=True).start()
+
+    def _stop_monitoring(self):
+        # 停止所有正在运行的监控任务
+        self.stop_button.config(state="disabled", text="⏸️ 停止中...")
+        
+        def stop_async():
+            for server_id, watcher in self.watchers.items():
+                try:
+                    watcher.stop()
+                    logging.info(f"[{server_id}] 正在停止监控...")
+                except Exception as e:
+                    logging.error(f"[{server_id}] 停止监控时出错: {e}")
+            time.sleep(1)
+            self.after(0, self._finalize_stop)
+
+        Thread(target=stop_async, daemon=True).start()
 
     def _stop_all_watchers(self):
         self.stop_button.config(state="disabled", text="⏸️ 停止中...")
@@ -432,13 +519,13 @@ class App(ThemedTk):
     def _finalize_stop(self):
         self.watchers.clear()
         self._set_ui_state("idle")
-        self.stop_button.config(text="⏸️ 停止全部")
+        self.stop_button.config(text="⏸️ 停止监控")
         self._populate_server_list() # Reset status to "就绪"
         logging.info("所有监控任务已停止。", extra={'tag': 'SUCCESS'})
 
     def _set_ui_state(self, state):
         if state == "watching":
-            self.start_button.config(state="disabled")
+            self.start_button.config(state="normal")
             self.stop_button.config(state="normal")
         else: # idle
             self.start_button.config(state="normal")
@@ -450,6 +537,56 @@ class App(ThemedTk):
         logging.getLogger().addHandler(log_handler)
         logging.getLogger().setLevel(logging.DEBUG)  # 启用DEBUG级别以查看详细日志
         logging.info("Auto FTP Sync v5.0.0 启动成功", extra={'tag': 'SUCCESS'})
+
+    def _on_tree_click(self, event):
+        # 仅当点击到“选择”列时切换勾选
+        region = self.server_tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        column = self.server_tree.identify_column(event.x)
+        if column != "#1":  # 第一列为 selected
+            return
+        item = self.server_tree.identify_row(event.y)
+        if not item:
+            return
+        # 将焦点移动到点击的行，便于“编辑/删除”按钮取用
+        self.server_tree.focus(item)
+        server_id = item
+        if server_id in self.selected_ids:
+            self.selected_ids.remove(server_id)
+            sel_mark = '☐'
+        else:
+            self.selected_ids.add(server_id)
+            sel_mark = '☑'
+        # 更新该行的显示（保持其他列不变）
+        vals = list(self.server_tree.item(item, 'values'))
+        if vals:
+            vals[0] = sel_mark
+            self.server_tree.item(item, values=tuple(vals))
+
+    def _select_all(self):
+        # 勾选所有服务器
+        self.selected_ids = {s['id'] for s in self.servers}
+        for server in self.servers:
+            sid = server['id']
+            vals = list(self.server_tree.item(sid, 'values'))
+            if vals:
+                vals[0] = '☑'
+                self.server_tree.item(sid, values=tuple(vals))
+
+    def _unselect_all(self):
+        # 取消全选
+        self.selected_ids.clear()
+        for server in self.servers:
+            sid = server['id']
+            vals = list(self.server_tree.item(sid, 'values'))
+            if vals:
+                vals[0] = '☐'
+                self.server_tree.item(sid, values=tuple(vals))
+
+    def _setup_styles(self):
+        style = ttk.Style(self)
+        style.configure('Tool.TButton', padding=(10, 6))
 
     def _on_closing(self):
         if self.watchers:
