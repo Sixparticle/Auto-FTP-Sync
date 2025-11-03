@@ -448,7 +448,7 @@ class App(ThemedTk):
         log_handler = TextHandler(self.log_text)
         log_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
         logging.getLogger().addHandler(log_handler)
-        logging.getLogger().setLevel(logging.INFO)
+        logging.getLogger().setLevel(logging.DEBUG)  # 启用DEBUG级别以查看详细日志
         logging.info("Auto FTP Sync v5.0.0 启动成功", extra={'tag': 'SUCCESS'})
 
     def _on_closing(self):

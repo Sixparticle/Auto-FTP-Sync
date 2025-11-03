@@ -21,6 +21,88 @@ from queue import Queue
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# 禁用代理，确保FTP连接直连服务器
+# 这可以避免代理软件干扰FTP的双通道连接
+os.environ['NO_PROXY'] = '*'
+os.environ['no_proxy'] = '*'
+
+# 创建自定义FTP类，强制使用直连socket
+class DirectFTP(FTP):
+    """FTP类的子类，强制所有连接（包括数据连接）绕过代理"""
+    def __init__(self, *args, **kwargs):
+        self._original_socket = socket.socket
+        super().__init__(*args, **kwargs)
+    
+    def connect(self, host, port=0, timeout=-999, source_address=None):
+        """重写connect方法，使用直连socket"""
+        original_func = socket.socket
+        socket.socket = lambda af, socktype, proto=0: self._original_socket(af, socktype, proto)
+        try:
+            result = super().connect(host, port, timeout, source_address)
+            return result
+        finally:
+            socket.socket = original_func
+    
+    def makepasv(self):
+        """重写makepasv方法，确保被动模式的数据连接也绕过代理"""
+        original_func = socket.socket
+        socket.socket = lambda af, socktype, proto=0: self._original_socket(af, socktype, proto)
+        try:
+            result = super().makepasv()
+            return result
+        finally:
+            socket.socket = original_func
+    
+    def ntransfercmd(self, cmd, rest=None):
+        """重写ntransfercmd方法，确保数据传输连接绕过代理"""
+        original_func = socket.socket
+        socket.socket = lambda af, socktype, proto=0: self._original_socket(af, socktype, proto)
+        try:
+            logging.debug(f"[DirectFTP] 创建数据传输连接: {cmd}")
+            result = super().ntransfercmd(cmd, rest)
+            logging.debug(f"[DirectFTP] 数据连接创建成功")
+            return result
+        finally:
+            socket.socket = original_func
+
+class DirectFTP_TLS(FTP_TLS):
+    """FTP_TLS类的子类，强制所有连接（包括数据连接）绕过代理"""
+    def __init__(self, *args, **kwargs):
+        self._original_socket = socket.socket
+        super().__init__(*args, **kwargs)
+    
+    def connect(self, host, port=0, timeout=-999, source_address=None):
+        """重写connect方法，使用直连socket"""
+        original_func = socket.socket
+        socket.socket = lambda af, socktype, proto=0: self._original_socket(af, socktype, proto)
+        try:
+            result = super().connect(host, port, timeout, source_address)
+            return result
+        finally:
+            socket.socket = original_func
+    
+    def makepasv(self):
+        """重写makepasv方法，确保被动模式的数据连接也绕过代理"""
+        original_func = socket.socket
+        socket.socket = lambda af, socktype, proto=0: self._original_socket(af, socktype, proto)
+        try:
+            result = super().makepasv()
+            return result
+        finally:
+            socket.socket = original_func
+    
+    def ntransfercmd(self, cmd, rest=None):
+        """重写ntransfercmd方法，确保数据传输连接绕过代理"""
+        original_func = socket.socket
+        socket.socket = lambda af, socktype, proto=0: self._original_socket(af, socktype, proto)
+        try:
+            logging.debug(f"[DirectFTP_TLS] 创建数据传输连接: {cmd}")
+            result = super().ntransfercmd(cmd, rest)
+            logging.debug(f"[DirectFTP_TLS] 数据连接创建成功")
+            return result
+        finally:
+            socket.socket = original_func
+
 class ConfigManager:
     """Handles loading and saving of FTP configurations."""
     
@@ -128,6 +210,15 @@ class FTPUploader:
         self.config = config
         self.ftp = None
         self.last_activity_time = 0  # 记录最后活动时间
+        self.socket_timeout = 60  # socket超时时间（秒）
+
+    def _set_socket_timeout(self):
+        """确保FTP连接的socket设置了超时时间"""
+        if self.ftp and self.ftp.sock:
+            try:
+                self.ftp.sock.settimeout(self.socket_timeout)
+            except Exception:
+                pass  # 忽略设置超时失败的情况
 
     def connect(self):
         """Connects to the FTP server, with optional FTPS support."""
@@ -143,14 +234,15 @@ class FTPUploader:
 
             use_tls = self.config.get('secure', False)
             
+            # 使用自定义FTP类，强制绕过代理
             if use_tls:
-                self.ftp = FTP_TLS()
+                self.ftp = DirectFTP_TLS()
             else:
-                self.ftp = FTP()
+                self.ftp = DirectFTP()
 
-            # 设置超时时间（30秒）防止连接长时间阻塞
+            # 设置超时时间（60秒）防止连接长时间阻塞
             # Connect using the resolved IP address
-            self.ftp.connect(ip_address, int(self.config.get('port', 21)), timeout=30)
+            self.ftp.connect(ip_address, int(self.config.get('port', 21)), timeout=self.socket_timeout)
             self.ftp.login(self.config['username'], self.config['password'])
             
             if use_tls:
@@ -161,8 +253,11 @@ class FTPUploader:
             self.ftp.encoding = 'utf-8'
             self.ftp.cwd(self.config['remote_dir'])
             
+            # 为底层socket设置超时，确保所有后续操作都有超时保护
+            self._set_socket_timeout()
+            
             self.last_activity_time = time.time()  # 更新活动时间
-            logging.info(f"FTP{'S' if use_tls else ''} 连接成功到 {host} ({ip_address})")
+            logging.info(f"FTP{'S' if use_tls else ''} 连接成功到 {host} ({ip_address}) [已绕过系统代理]")
             return True
         except Exception as e:
             logging.error(f"FTP 连接失败: {e}")
@@ -173,6 +268,8 @@ class FTPUploader:
         if not self.ftp:
             return False
         try:
+            # 确保socket超时已设置
+            self._set_socket_timeout()
             # 发送 NOOP 命令检查连接
             self.ftp.voidcmd("NOOP")
             self.last_activity_time = time.time()
@@ -230,6 +327,9 @@ class FTPUploader:
                 logging.error(f"  [上传失败] {remote_path}: 无法建立FTP连接")
                 return False
             
+            # 确保socket超时已设置
+            self._set_socket_timeout()
+            
             self._ensure_remote_dir(remote_path)
             with open(local_path, 'rb') as f:
                 self.ftp.storbinary(f'STOR {remote_path}', f)
@@ -254,6 +354,9 @@ class FTPUploader:
                 logging.error(f"  [删除失败] {remote_path}: 无法建立FTP连接")
                 return False
             
+            # 确保socket超时已设置
+            self._set_socket_timeout()
+            
             self.ftp.delete(remote_path)
             self.last_activity_time = time.time()  # 更新活动时间
             logging.info(f"  [删除成功] {remote_path}")
@@ -277,6 +380,9 @@ class FTPUploader:
             if not self.reconnect_if_needed():
                 logging.error(f"  [删除目录失败] {remote_path}: 无法建立FTP连接")
                 return False
+            
+            # 确保socket超时已设置
+            self._set_socket_timeout()
             
             logging.info(f"  [开始删除目录] {remote_path}")
             
